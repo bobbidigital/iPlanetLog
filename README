@@ -1,0 +1,3 @@
+
+These classes were designed to turn the iPlanet logs into objects. It currently is only designed to handle the formats that I required at the time,
+but should be relatively easy to extend it to additional fields
