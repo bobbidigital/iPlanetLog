@@ -227,7 +227,11 @@ class iPlanetLogFile(object):
         line.seek(0)
         pattern = r'(.+?%s)' % re.escape(previous_field.value)
         data = line.readline()
-        offset = len(re.match(pattern,data ).group(1) ) + 1
+        try:
+            offset = len(re.match(pattern,data ).group(1) ) + 1
+        except AttributeError:
+            raise FieldDelimiterError(data)
+
         if offset > len(data):
             raise LogFormatError(data)
         dangling_field = copy.copy(previous_field)
