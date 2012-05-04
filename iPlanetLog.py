@@ -6,6 +6,18 @@ import StringIO
 import copy
 import logging
 import datetime
+from functools import wraps
+import time
+
+def timed(f):
+    @wraps(f)
+    def wrapper(*args, **kwds):
+        start = time.time()
+        result = f(*args, **kwds)
+        elapsed = time.time() - start
+        print "%s took %d time to finish" % (f.__name__, elapsed)
+        return result
+    return wrapper
 
 class Error(Exception):
     def __init__(self,value):
@@ -38,21 +50,29 @@ class iPlanetLogField(object):
         self.end_delimiter = values[2]
         self.value = ""
 
+
     @property
     def regex_string(self):
         #The format line claims that the content-type field is space delimited, but when the charset variable is
         #present, there is a space. So we just make a special check for this. Sucks, I know.
         if re.match(".+(content-type)", self.name):
             #pattern = r'%s([^%s]+(?:\scharset=[^%s]+)?)' % (self.escape(self.start_delimiter),
-            pattern = r'%s(((?:[^%s]*(?:\scharset=[^%s]+)?|(-))))' % (self.escape(self.start_delimiter),
-                                                      		      self.escape(self.end_delimiter),
-                                                     		      self.end_delimiter)
+            #pattern = r'%s(((?:[^%s]*(?:\scharset=[^%s]+)?|(-))))' % (self.escape(self.start_delimiter),
+            #                                         		      self.escape(self.end_delimiter),
+            #                                        		      self.end_delimiter)
+
+            pattern = r'%s(.+?(?:;\scharset=[^%s]+)?)%s'    % (self.escape(self.start_delimiter),
+                                                              self.escape(self.end_delimiter),
+                                                              self.end_delimiter)
+
         elif self.start_delimiter:
             pattern=r'%s(.*?)%s\s' % (self.escape(self.start_delimiter),
                                         self.end_delimiter)
 
+        elif self.isempty():
+            pattern=r'(\s)'
         else:
-            pattern = r'%s([^%s]*?)%s' % (self.escape(self.start_delimiter),
+            pattern = r'%s([^%s]+)%s' % (self.escape(self.start_delimiter),
                                         self.escape(self.end_delimiter),
                                         self.end_delimiter)
         return pattern
@@ -207,6 +227,8 @@ class iPlanetLogFile(object):
         else:
             raise TypeError("Log file does not have the proper header")
         self._build_fields(line)
+        self.first_success = 0
+        self.rehash_success = 0
 
 
     def __iter__(self):
@@ -221,7 +243,8 @@ class iPlanetLogFile(object):
         return { "(" : ")", "[" : "]", "<" : ">", "{" : "}"}
 
     def read(self):
-        return StringIO.StringIO(self._file.readline())
+        return self._file.readline()
+
 
     def reprocess_previous_field(self,previous_field,current_field,line):
         line.seek(0)
@@ -250,6 +273,14 @@ class iPlanetLogFile(object):
 
     def next(self):
         line = self.read()
+        try:
+            return self._parse_log_line(line)
+        except FieldDelimiterError:
+            return self.parse_by_field(line)
+
+
+    def parse_by_field(self,line):
+        line = StringIO.StringIO(line)
         offset = 0
         populated_fields = []
         for field in self._fields:
@@ -272,6 +303,22 @@ class iPlanetLogFile(object):
             populated_fields.append(field)
             offset += field.length()
         return iPlanetLogRecord(populated_fields)
+
+
+    def _parse_log_line(self,line):
+        results = self.regex_object.match(line)
+        populated_fields = []
+        x = 1
+        if results:
+            for field in self._fields:
+                field.value = results.group(x)
+                populated_fields.append(field)
+                x += 1
+            self.first_success += 1
+            return iPlanetLogRecord(populated_fields)
+        else:
+            raise FieldDelimiterError('Could not parse with single regex')
+
 
     def _extract_field(self,field,line, offset=0,chunk_size=None):
         line.seek(0)
@@ -297,6 +344,7 @@ class iPlanetLogFile(object):
                 else:
                     chunk_size += chunk_size
                     field = self._extract_field(field,line,offset=offset,chunk_size=chunk_size)
+        self.rehash_success += 1
         return field
 
     def _build_fields(self,line):
@@ -336,12 +384,22 @@ class iPlanetLogFile(object):
             else:
                 field.append(character)
                 character = line.read(1)
+        self._build_regex_string()
+
+
+    def _build_regex_string(self):
+        regex_string_list = []
+        for field in self._fields:
+            regex_string_list.append("%s" % field.regex_string)
+        self.regex_string = r''.join(regex_string_list)
+        self.regex_object = re.compile(self.regex_string)
 
 def main():
 
-    file = "C:\\temp\\data\\log2_old.txt"
+    file = "C:\\temp\\data\\access\\output.txt"
+    file = open(file,'r')
     parser = iPlanetLogFile(file)
-    output_file = open('C:\\temp\\data\\converted_log2.txt', 'w')
+    output_file = open('C:\\temp\\data\\access\\converted_output.txt', 'w')
     error_count = 0
     output_order = ('clientip','user','date','request','status','user_agent','time','url',
         'query_string','cookies', 'referer')
@@ -349,15 +407,20 @@ def main():
     output_file.write("#Software: Microsoft Internet Information Services 6.0\n")
     output_file.write("#Version: 1.0\n")
     output_file.write("#Fields: c-ip cs-username date cs-method sc-status cs(User-Agent) time cs-uri-stem cs-uri-query cs(Cookie) cs(Referer)\n")
+    write_buffer = []
     for entry in parser:
         if not entry.has_errors:
-            output_file.write(entry.as_string(replace_spaces=True, ordered_output=output_order))
-            output_file.write("\n")
+            write_buffer.append("%s\n" % entry.as_string(replace_spaces=True,ordered_output=output_order))
+            if len(write_buffer) > 10000:
+                output_file.writelines(write_buffer)
+                write_buffer = []
         else:
             print "Error loading\n %s" % entry.error_msg
             error_count += 1
 
     print "Number of Errors %s" % error_count
+    print "First pass success: %s" % parser.first_success
+    print "Rehash success: %s" % parser.rehash_success
     output_file.close()
 if __name__ == "__main__":
     main()
